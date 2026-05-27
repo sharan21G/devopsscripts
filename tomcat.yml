@@ -1,0 +1,140 @@
+---
+# Ansible Playbook: Install Apache Tomcat 10.1.x on all Production nodes
+# Tomcat version: 10.1.40 (latest stable as of 2025)
+# Java: OpenJDK 17 (Amazon Corretto)
+---
+
+- name: Setup Tomcat
+  hosts: all
+  become: yes
+  vars:
+    tomcat_version: "10.1.40"
+    tomcat_url: "https://dlcdn.apache.org/tomcat/tomcat-10/v{{ tomcat_version }}/bin/apache-tomcat-{{ tomcat_version }}.tar.gz"
+    tomcat_install_dir: "/opt/tomcat"
+    tomcat_user: "tomcat"
+    java_home: "/usr/lib/jvm/java-17-amazon-corretto"
+
+  tasks:
+
+        # ── 1. Create dedicated tomcat user ──────────────────────────────
+    - name: Create tomcat system user
+      user:
+        name: "{{ tomcat_user }}"
+        shell: /sbin/nologin
+        system: yes
+        create_home: no
+
+        # ── 2. Install Java (OpenJDK 17 via Amazon Corretto) ─────────────
+    - name: Install Java 17 (Amazon Corretto)
+      yum:
+        name: java-17-amazon-corretto
+        state: present
+
+        # ── 3. Create install directory ──────────────────────────────────
+    - name: Create Tomcat install directory
+      file:
+        path: "{{ tomcat_install_dir }}"
+        state: directory
+        owner: "{{ tomcat_user }}"
+        group: "{{ tomcat_user }}"
+        mode: '0755'
+
+        # ── 4. Download Tomcat tarball ────────────────────────────────────
+    - name: Download Tomcat {{ tomcat_version }} from Apache CDN
+      get_url:
+        url: "{{ tomcat_url }}"
+        dest: "/tmp/apache-tomcat-{{ tomcat_version }}.tar.gz"
+        mode: '0644'
+
+        # ── 5. Extract Tomcat ─────────────────────────────────────────────
+    - name: Extract Tomcat archive
+      unarchive:
+        src: "/tmp/apache-tomcat-{{ tomcat_version }}.tar.gz"
+        dest: "{{ tomcat_install_dir }}"
+        remote_src: yes
+        extra_opts: ["--strip-components=1"]
+        owner: "{{ tomcat_user }}"
+        group: "{{ tomcat_user }}"
+
+        # ── 6. Set executable permissions on scripts ─────────────────────
+    - name: Set execute permissions on Tomcat bin scripts
+      file:
+        path: "{{ tomcat_install_dir }}/bin"
+        state: directory
+        recurse: yes
+        mode: 'u+x'
+
+        # ── 7. Configure tomcat-users.xml ────────────────────────────────
+    - name: Configure tomcat-users.xml
+      copy:
+        dest: "{{ tomcat_install_dir }}/conf/tomcat-users.xml"
+        owner: "{{ tomcat_user }}"
+        group: "{{ tomcat_user }}"
+        mode: '0640'
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <tomcat-users>
+            <role rolename="manager-gui"/>
+            <role rolename="manager-script"/>
+            <role rolename="admin-gui"/>
+            <user username="admin" password="StrongPass@2025"
+                  roles="manager-gui,manager-script,admin-gui"/>
+          </tomcat-users>
+
+        # ── 8. Allow Manager access from any IP (dev/prod toggle) ────────
+    - name: Allow Manager app access from any IP
+      copy:
+        dest: "{{ tomcat_install_dir }}/webapps/manager/META-INF/context.xml"
+        owner: "{{ tomcat_user }}"
+        group: "{{ tomcat_user }}"
+        content: |
+          <Context antiResourceLocking="false"
+                   privileged="true" >
+            <!-- Remove IP restriction for remote access -->
+            <CookieProcessor className="org.apache.tomcat.util.http.Rfc6265CookieProcessor"
+                             sameSiteCookies="strict" />
+          </Context>
+
+        # ── 9. Create systemd service unit ───────────────────────────────
+    - name: Create Tomcat systemd service file
+      copy:
+        dest: /etc/systemd/system/tomcat.service
+        content: |
+          [Unit]
+          Description=Apache Tomcat 10 Web Application Server
+          After=network.target
+
+          [Service]
+          Type=forking
+          User=tomcat
+          Group=tomcat
+          Environment="JAVA_HOME={{ java_home }}"
+          Environment="CATALINA_HOME={{ tomcat_install_dir }}"
+          Environment="CATALINA_PID={{ tomcat_install_dir }}/temp/tomcat.pid"
+          ExecStart={{ tomcat_install_dir }}/bin/startup.sh
+          ExecStop={{ tomcat_install_dir }}/bin/shutdown.sh
+          Restart=on-failure
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+
+        # ── 10. Reload systemd daemon ─────────────────────────────────────
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+        # ── 11. Start & enable Tomcat service ────────────────────────────
+    - name: Start and enable Tomcat service
+      service:
+        name: tomcat
+        state: started
+        enabled: yes
+
+        # ── 12. Verify Tomcat is listening on port 8080 ───────────────────
+    - name: Wait for Tomcat to be ready on port 8080
+      wait_for:
+        host: localhost
+        port: 8080
+        delay: 5
+        timeout: 60
